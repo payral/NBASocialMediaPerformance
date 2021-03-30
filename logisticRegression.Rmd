@@ -1,0 +1,191 @@
+---
+title: "NBA Logistic Regression" 
+author: "Peter Ayral"
+date: "6/10/2020"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+## Setup
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(boot)
+library(car)
+nba_twitter <- read.csv('nba_2017_players_with_salary_wiki_twitter.csv')
+nba_pie <- read.csv('nba_2017_pie.csv')
+```
+
+The following chunk downloads the pie and twitter csv files, and removes the PIE variables:
+
+```{r pie_twitter_combine}
+nba_pie_twitter <- merge(nba_pie, nba_twitter, by='PLAYER', all=TRUE)
+# remove duplicate columns
+nba_pie_twitter <- nba_pie_twitter[,-grep('.y',names(nba_pie_twitter))]
+colnames(nba_pie_twitter) <- gsub('.x','',colnames(nba_pie_twitter))
+write.csv(nba_pie_twitter, 
+          "~/Documents/School Assignments Folder/2019-2020 School Year/PSTAT 131/Final Project/nba_2017_pie_twitter.csv")
+# Creates dataframe without names (used for logistic regression functions)
+nba_pt <- select(nba_pie_twitter, -c('PLAYER','POSITION','TEAM','POINTS','FG','FT',
+                                     'FGA','FTA','ORB','DRB','AST','STL','BLK','PF',
+                                     'TOV'))
+# NOTE: SUPER IMPORTANT to list the levels in order (so glm makes 1=high, 0=low)
+nba_pt['PIE_RESPONSE'] <- factor(ifelse(nba_pt$PIE>=mean(nba_pt$PIE),'high','low'),
+                                 order=TRUE, levels=c('low','high'))
+grps <- 4 # 4 folds / groups
+response <- 'PIE_RESPONSE'
+```
+
+Then, the data is split into 4 groups for 4-fold cross validation.
+
+```{r log_error_df}
+set.seed(69)
+id <- cut(1:nrow(nba_pt),breaks=grps,labels=FALSE) %>% sample()
+resp_col <- which(colnames(nba_pt) == response)
+# replaces NA values with mean of that column.
+for (i in colnames(nba_pt)) {
+  if (i != response) {
+    nba_pt[,i] = nba_pt[,i] %>% replace_na(mean(nba_pt[,i], na.rm=T))
+  }
+}
+# Data Frame containing training and test error for each predictor along with its formula
+error_df <- data.frame(matrix(NA,nrow=3,ncol=2),
+                       row.names=c('Twitter','Salary','No additions'))
+colnames(error_df) <- c('train.error','test.error')
+error_df['formula'] <- c('','','')
+```
+
+## Logistic Regression
+
+```{r log_formulas}
+# This will determine which terms create the best model for PIE
+best_formula_func <- function(starting_vars) {
+  starting_vars <- as.formula(paste0('PIE ~ ', starting_vars))
+  
+  test0.glm <- glm(PIE ~ 1, data=nba_pt)
+  testN.glm <- glm(PIE ~ . - PIE_RESPONSE, data=nba_pt)
+  test.glm <- glm(starting_vars, data=nba_pt)
+  
+  best_model <- step(test.glm, scope=list(lower=test0.glm, upper=testN.glm), 
+                     direction='forward', trace=0)
+  best_formula <- best_model$formula
+  best_formula <- as.formula(paste0(response,' ~ ', 
+                                    gsub('~, PIE, ','',toString(best_formula))))
+  return(best_formula)
+}
+# This will predict the training and test error rates for the given formula / method.
+predict_func <- function(formula, method) {
+  train.error <- 0
+  test.error <- 0
+  
+  if ((is_formula(formula)) == FALSE) { formula <- as.formula(formula) }
+  
+  for (i in 1:grps) {
+    train <- (i != id)
+    nba_pt.train <- nba_pt[train,]
+    nba_pt.test <- nba_pt[!train,]
+    
+    Ytr <- factor(nba_pt.train[,response], order=T, levels=c('low','high'))
+    Yvl <- factor(nba_pt.test[,response], order=T, levels=c('low','high'))
+    
+    twitter.glm <- glm(formula, data=nba_pt.train, family=binomial(link="logit"))
+    if (i==grps) {
+      print(paste0("The coefficients (and variables) for method = ", method, " when id = ",
+                   i, ":"))
+      print(twitter.glm$coefficients)
+    }
+    predYtr <- predict.glm(twitter.glm, nba_pt.train, type='response')
+    predYtr <- factor(ifelse(predYtr>=0.5,'high','low'), order=TRUE, levels=c('low','high'))
+    
+    predYvl <- predict.glm(twitter.glm, nba_pt.test, type='response')
+    predYvl <- factor(ifelse(predYvl>=0.5,'high','low'), order=TRUE, levels=c('low','high'))
+    
+    train.error <- train.error + mean(predYtr != Ytr)
+    test.error <- test.error + mean(predYvl != Yvl)
+  }
+  error_df[method,] <- c(train.error/grps, test.error/grps, 
+                         gsub('~, PIE_RESPONSE,','', toString(formula)))
+  return(error_df)
+}
+```
+
+
+```{r log_regression_twitter, warning=FALSE}
+str <- 'TWITTER_FAVORITE_COUNT + TWITTER_RETWEET_COUNT + PAGEVIEWS'
+best_formula <- best_formula_func(str)
+error_df <- predict_func(best_formula,'Twitter')
+```
+
+```{r log_regression_salary, warning=FALSE}
+str <- 'SALARY_MILLIONS'
+best_formula <- best_formula_func(str)
+error_df <- predict_func(best_formula, 'Salary')
+```
+
+```{r log_regression_no_additions, warning=FALSE}
+str <- '1'
+best_formula <- best_formula_func(str)
+error_df <- predict_func(best_formula,'No additions')
+```
+
+```{r print_error_df, echo=FALSE}
+print('The training and test errors for each method: ')
+print(error_df[,1:2])
+```
+
+The graphs below compare histogram frequncies of Player Impact Estimate (PIE) to Twitter, Wikipedia (PAGEVIEWS), and salary values.
+
+```{r pie_twitter_hist, fig.height=3, fig.width=6}
+plot1 <- ggplot(data=nba_pt, aes(x=PIE)) + geom_histogram(fill='#e12825', bins=15)
+plot2 <- ggplot(data=nba_pt, aes(x=TWITTER_FAVORITE_COUNT)) + 
+  geom_histogram(fill='#08a0e9', binwidth=300)
+plot3 <- ggplot(data=nba_pt, aes(x=TWITTER_RETWEET_COUNT)) + 
+  geom_histogram(fill='#08a0e9', bins=20)
+plot4 <- ggplot(data=nba_pt, aes(x=PAGEVIEWS)) + geom_histogram(fill='#08a0e9', bins=15)
+grid.arrange(plot1, plot2, ncol=2, nrow=1)
+grid.arrange(plot3, plot4, ncol=2, nrow=1)
+```
+
+```{r pie_salary_hist, fig.height=3, fig.width=6}
+plot1 <- ggplot(data=nba_pt, aes(x=PIE)) + geom_histogram(fill='#e12825', bins=15)
+plot2 <- ggplot(data=nba_pt, aes(x=SALARY_MILLIONS)) + 
+  geom_histogram(fill='#27bd22', bins=15)
+grid.arrange(plot1, plot2, ncol=2, nrow=1)
+```
+
+
+## Avplots
+
+The following graphs measure correlation between each variable used in the three formulas above and Player Impact Estimate (PIE). The first avPlot we will test is Twitter's logistic regression formula, and its relation to PIE.
+
+### Twitter / Wikipedia (PAGEVIEWS) Logistic Regression
+
+```{r avPlot1_log_reg, fig.height=2, fig.width=6}
+three_str <- paste('PIE ~',error_df[,3])
+formula1 <- as.formula(three_str[1])
+glm1 <- glm(formula1, data=nba_pt)
+par(mfrow=c(1,3), mai=c(0.76,0.76,0,0))
+avPlots(glm1, layout=NA)
+```
+
+
+### Salary Logistic Regression
+
+```{r avPlot2_log_reg, fig.height=1.75, fig.width=6}
+formula2 <- as.formula(three_str[2])
+glm2 <- glm(formula2, data=nba_pt)
+par(mfrow=c(1,3), mai=c(0.76,0.76,0,0))
+avPlots(glm2, layout=NA)
+```
+
+### Logistic Regression with No Additional Initial Variables
+
+```{r avPlot3_log_reg, fig.height=1.75, fig.width=6}
+formula3 <- as.formula(three_str[3])
+glm3 <- glm(formula3, data=nba_pt)
+par(mfrow=c(1,3), mai=c(0.76,0.76,0,0))
+avPlots(glm3, layout=NA)
+```

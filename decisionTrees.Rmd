@@ -1,0 +1,199 @@
+---
+title: "Decision and Random Forest NBA"
+author: "Peter Ayral"
+date: "June 6, 2020"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+\newpage
+#Decision Tree and Random Forest Classification
+
+
+##Decision Tree
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Including Libraries
+```{r, echo = FALSE}
+library(ggplot2)
+library(tidyverse)
+library(tree)
+library(maptree)
+library(cowplot)
+library(randomForest)
+library(gridExtra)
+```
+
+Importing Data
+```{r}
+nba_stats<-read.csv("nba_2017_players_stats_combined.csv")
+nba_twitter <- read.csv('nba_2017_players_with_salary_wiki_twitter.csv')
+#glimpse(nba_twitter)
+```
+Only 239 NBA players have twitter accounts, leading to a smaller dataset.
+
+
+Cleaning the data, and creating a classification variable PIE_HIGH
+```{r}
+summary(nba_stats$PIE)
+summary(nba_twitter$PIE)
+
+#the median PIE for nba players with twitter accounts is 0.4 higher than without
+
+PIE_HIGH<-ifelse(nba_twitter$PIE<=8.9, "No", "Yes")
+nba_twitter<-data.frame(nba_twitter,PIE_HIGH)
+nba_twitter<-nba_twitter%>%select(-X,-Rk,-MP)
+nba_socialmedia<-nba_twitter%>%select(PIE_HIGH,SALARY_MILLIONS,PAGEVIEWS,TWITTER_FAVORITE_COUNT,TWITTER_RETWEET_COUNT)
+
+```
+
+Splitting the data into test and training sets.
+```{r}
+set.seed(2)
+dim(nba_socialmedia)
+nba_train<- sample(1:nrow(nba_socialmedia), 0.75*dim(nba_socialmedia)[1])
+nba_test<-nba_socialmedia[-nba_train,]
+nba_train<-nba_socialmedia[nba_train,]
+#nba_test
+nba_test_high<-nba_test$PIE_HIGH
+```
+
+Making the decision tree
+```{r}
+nba_twitter_tree<- tree(PIE_HIGH~.,data=nba_train)
+summary(nba_twitter_tree)
+draw.tree(nba_twitter_tree, nodeinfo=TRUE, cex=0.6)
+title("Classification Tree of NBA Player Performance on Training Set")
+```
+
+Here in the training set, twitter retweet count is a better indicator of performance than salary.
+
+Finding the best size
+```{r}
+prune<- prune.tree(nba_twitter_tree, k = 0:20, method = "misclass")
+best.prune<- prune$size[which.min(prune$dev)]
+best.prune
+pt.prune <- prune.misclass(nba_twitter_tree, best=best.prune)
+draw.tree(pt.prune,nodeinfo=TRUE,cex=0.5)
+title("Pruned Tree")
+```
+
+Performing a cross validation and finding the best size for it
+```{r}
+cv_tree<-cv.tree(nba_twitter_tree,FUN=prune.misclass,K=5)
+cv_tree
+best.cv = cv_tree$size[which.min(cv_tree$dev)]
+best.cv
+```
+
+Graphing the CV misclassification error
+
+```{r}
+#Making a dataframe for ggplot
+cv_graph<-data.frame(Size = cv_tree$size, Missclass= cv_tree$dev, k=cv_tree$k)
+p<-ggplot(cv_graph,mapping=aes(x=Size, y=Missclass)) + geom_point(color="red",shape=1, size=4)+geom_line(color="red")+ggtitle("CV")
+q<-ggplot(cv_graph,mapping=aes(x=k, y=Missclass)) + geom_point(color="blue",shape=1, size=4)+geom_line(color="blue")+ggtitle("CV")
+grid.arrange(p,q,ncol=2)
+
+```
+
+Plotting the CV tree
+```{r}
+pt.cv <-prune.misclass(nba_twitter_tree, best=best.cv)
+draw.tree(pt.cv,nodeinfo=TRUE,cex=0.6)
+title("CV tree")
+```
+
+Calculating the Test Error error Rates for the Pruned and CV models
+
+```{r}
+#Predicting on test set
+pred.pt.prune<-predict(pt.prune, nba_test, type="class")
+# Obtain confusion matrix
+err.pt.prune<-table(pred.pt.prune, nba_test_high)
+err.pt.prune
+print("Classification Error for Pruned Model:")
+1-sum(diag(err.pt.prune))/sum(err.pt.prune)
+
+# Predict on test set
+pred.pt.cv = predict(pt.cv, nba_test, type="class")
+# Obtain confusion matrix
+err.pt.cv = table(pred.pt.cv, nba_test_high)
+err.pt.cv
+
+print("Classification Error for CV Model:")
+1-sum(diag(err.pt.cv))/sum(err.pt.cv)
+
+```
+Since the number of leaves were the same, we have the same error rate for both.
+
+##Random Forest
+
+```{r,include=FALSE}
+library(cowplot)
+library(randomForest)
+```
+
+Making the Forest
+```{r}
+set.seed(69)
+nba_forest<-randomForest(PIE_HIGH~.,data=nba_socialmedia,proximity=TRUE,na.action=na.roughfix)
+nba_forest
+```
+
+Graphing the Classification Error Rates
+```{r}
+oob.error.data <- data.frame(
+  Trees=rep(1:nrow(nba_forest$err.rate), times=3),
+  Type=rep(c("OOB", "No", "Yes"), each=nrow(nba_forest$err.rate)),
+  Error=c(nba_forest$err.rate[,"OOB"], 
+          nba_forest$err.rate[,"No"], 
+          nba_forest$err.rate[,"Yes"]))
+
+ggplot(data=oob.error.data, aes(x=Trees, y=Error)) +
+  geom_line(aes(color=Type))
+```
+
+Trying twice as many trees
+```{r}
+set.seed(69)
+nba_forest<-randomForest(PIE_HIGH~.,data=nba_train,proximity=TRUE,na.action=na.roughfix,ntree=1000)
+nba_forest
+
+oob.error.data <- data.frame(
+  Trees=rep(1:nrow(nba_forest$err.rate), times=3),
+  Type=rep(c("OOB", "No", "Yes"), each=nrow(nba_forest$err.rate)),
+  Error=c(nba_forest$err.rate[,"OOB"], 
+          nba_forest$err.rate[,"No"], 
+          nba_forest$err.rate[,"Yes"]))
+
+ggplot(data=oob.error.data, aes(x=Trees, y=Error)) +
+  geom_line(aes(color=Type))
+```
+
+It levels out around 750 so we have a good sized forest there.
+
+Measuring Variable Significance
+
+```{r}
+feat_imp_df <- importance(nba_forest) %>% 
+  data.frame() %>% 
+  mutate(feature = row.names(.)) 
+
+# plot dataframe
+ggplot(feat_imp_df, aes(x = reorder(feature, MeanDecreaseGini), 
+                        y = MeanDecreaseGini)) +
+  geom_bar(stat='identity',fill="#1979a9") +
+  coord_flip() + theme_classic() +
+  labs(
+    x     = "Feature",
+    y     = "Importance",
+    title = "Feature Importance: Model"
+  )
+```
+
+Using Gini importance mechanism, we see that salary is the best indicator for an NBA players performance.
