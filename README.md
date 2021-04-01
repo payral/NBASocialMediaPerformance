@@ -1,6 +1,8 @@
 # NBASocialMediaPerformance
 Using machine learning to predict NBA player's season performance based on their social media metrics
 
+I worked on this project in May, 2020.
+
 ## File Descriptions
 
 **nba_pie.csv**: Data file of each player and the team they are on  
